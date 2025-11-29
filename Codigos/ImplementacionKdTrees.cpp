@@ -94,7 +94,7 @@ public:
         // Ver si vale la pena explorar el otro subárbol
         double distPlano=abs(target[axis] - nodo->data[axis]);
         double distPlanoSq = distPlano * distPlano; // Distancia al cuadrado al plano de corte
-        if (distPlano<mejorDist) {
+        if (distPlanoSq<mejorDist) {
             nearest(sec, target, depth + 1, mejorNodo, mejorDist);
         }
     }

@@ -68,7 +68,7 @@ public:
             double diff = (double)p1[i] - (double)p2[i];
             sum += diff * diff;
         }
-        return sqrt(sum);
+        return sum;
     }
 
     // Búsqueda del vecino más cercano recursiva (branch & bound podado)
@@ -93,6 +93,7 @@ public:
 
         // Ver si vale la pena explorar el otro subárbol
         double distPlano=abs(target[axis] - nodo->data[axis]);
+        double distPlanoSq = distPlano * distPlano; // Distancia al cuadrado al plano de corte
         if (distPlano<mejorDist) {
             nearest(sec, target, depth + 1, mejorNodo, mejorDist);
         }

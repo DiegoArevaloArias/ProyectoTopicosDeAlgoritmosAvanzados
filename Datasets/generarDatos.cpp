@@ -2,71 +2,98 @@
 #include <fstream>
 #include <vector>
 #include <random>
-#include <filesystem> 
-
 using namespace std;
-namespace fs = std::filesystem;
 
-// Genera un dataset aleatorio y lo guarda en un archivo binario en la ruta exacta
-void generarDatosBinario(const string& rutaCompleta, int d, long long N){
-    ofstream fout(rutaCompleta, ios::binary);
-    if(!fout){
-        cerr << "No se puede abrir " << rutaCompleta << " para escritura\n";
+/*
+    Generador de dataset adecuado para pruebas de Vecino Más Cercano y LSH.
+    Características:
+      - K clusters gaussianos en R^d
+      - cada cluster tiene su propio centro
+      - se genera un % de puntos con “vecinos cercanos garantizados”
+      - los datos se guardan en binario como en tu código original
+*/
+
+void generarDatasetConEstructura(
+        const string& ruta,
+        int d, 
+        long long N,
+        int K = 5,                 // número de clusters
+        double clusterStd = 80.0,  // dispersión del cluster
+        double smallNoiseStd = 5.0,// ruido para crear vecinos cercanos
+        double fractionTwin = 0.01 // 1% de puntos con gemelos
+    )
+{
+    ofstream out(ruta, ios::binary);
+    if(!out){
+        cerr << "No se puede abrir archivo: " << ruta << "\n";
         return;
     }
 
     mt19937_64 rng(42);
-    uniform_int_distribution<long long> dist(0,1000);
-    vector<long long> punto(d);
 
-    for(long long i=0;i<N;i++){
-        for(int j=0;j<d;j++) punto[j] = dist(rng);
-        fout.write(reinterpret_cast<char*>(punto.data()), sizeof(long long)*d);
-        if((i+1)%100000==0) cout << "  " << (i+1) << "/" << N << " puntos generados...\r" << flush;
+    // distribuciones
+    normal_distribution<double> noise(0.0, clusterStd);
+    normal_distribution<double> smallNoise(0.0, smallNoiseStd);
+    uniform_real_distribution<double> centerDist(0.0, 1000.0);
+
+    // Generar centros de los clusters
+    vector<vector<double>> centros(K, vector<double>(d));
+    for(int k = 0; k < K; k++){
+        for(int j = 0; j < d; j++){
+            centros[k][j] = centerDist(rng);
+        }
     }
 
-    fout.close();
-    cout << "\nArchivo generado: " << rutaCompleta << " (" << N << " puntos, d=" << d << ")\n";
-}
+    long long numTwins = (long long)(N * fractionTwin);
 
-// Leer dataset binario
-vector<vector<long long>> leerDatosBinario(const string& rutaCompleta, int d, long long N) {
-    vector<vector<long long>> dataset(N, vector<long long>(d));
+    for(long long i = 0; i < N; i++){
+        
+        vector<long long> punto(d);
 
-    ifstream fin(rutaCompleta, ios::binary);
-    if(!fin){
-        cerr << "Error al abrir el archivo para lectura: " << rutaCompleta << "\n";
-        return {};
+        // Seleccionar cluster aleatorio
+        int c = rng() % K;
+
+        for(int j = 0; j < d; j++){
+            double val = centros[c][j] + noise(rng);
+            punto[j] = (long long) val;
+        }
+
+        // Guardar punto base
+        out.write(reinterpret_cast<char*>(punto.data()), sizeof(long long)*d);
+
+        // Crear un gemelo, solo para una parte del dataset
+        if(i < numTwins){
+            vector<long long> twin(d);
+            for(int j = 0; j < d; j++){
+                double val = punto[j] + smallNoise(rng);
+                twin[j] = (long long) val;
+            }
+            // también lo guardamos inmediatamente
+            out.write(reinterpret_cast<char*>(twin.data()), sizeof(long long)*d);
+            i++; // consumimos una posición
+        }
     }
 
-    for(long long i = 0; i < N; ++i){
-        fin.read(reinterpret_cast<char*>(dataset[i].data()), sizeof(long long) * d);
-    }
-
-    fin.close();
-    return dataset;
+    out.close();
+    cout << "Archivo generado: " << ruta 
+         << " (N=" << N << ", d=" << d << ", K=" << K << " clusters)"
+         << endl;
 }
 
 int main() {
-    int d[] = {2,10,100};// 2, 10, 100
-    long long N[] = {1000, 10000, 1000000};/// 1000, 10 000, 1 000 000 factible, 100 000 000??
-    string rutas[]={"small","medium","big"};
-    string rutaArchivo = ".bin";
-    for (int i = 0; i < 3; i++)
-    {
-        int dimension=d[i];
-        for (int j = 0; j < 3; j++)
-        {
-            long long tam=N[j];
-            string rutaArchivo = "d" + to_string(dimension) + rutas[j] + ".bin";
 
-            generarDatosBinario(rutaArchivo, dimension, tam);
+    // Ejemplo de uso
+    vector<int> dims = {2, 10, 100};
+    vector<long long> sizes = {1000, 10000, 1000000};
 
+    for(int d : dims){
+        for(long long N : sizes){
+            string name = "dataset_d" + to_string(d) 
+                        + "_N" + to_string(N) + ".bin";
+
+            generarDatasetConEstructura(name, d, N);
         }
-        
-
     }
-     
 
     return 0;
 }

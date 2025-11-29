@@ -3,198 +3,195 @@
 #include <random>
 #include <cmath>
 #include <limits>
-#include <sstream>
 #include <unordered_set>
+#include <cstdint>
 
 using namespace std;
 
-struct Nodo
-{
-    vector<long long> data;
-    Nodo* next = NULL;
-
-    Nodo(const vector<long long>& punto, Nodo* siguiente){
-        data = punto;
-        next = siguiente;
-    }
+struct Nodo {
+    int puntoId;
+    Nodo* next;
+    Nodo(int id, Nodo* n = nullptr) : puntoId(id), next(n) {}
 };
 
-class TablaHash{
-public:
-    int dimension; // dimension de los puntos R^d
-    long long cantidad; // cantidad de puntos 
-    vector<vector<Nodo*>> tabla; // tabla[L][bucketIndex]
-    
-    // Parámetros Local Sensitive Hahsing
-    int k; // número de funciones combinadas por tabla
-    int L; // número de tablas
-    double w; // anchura del bin window para LSH Euclidiana????
+class TablaHash {
+private:
+    const vector<vector<long long>>& dataset; // referencia al dataset maestro
+    int dimension;
+    long long cantidadBuckets;               // buckets por tabla
+    int k;
+    int L;
+    double w;
 
+    // A[t][j][dim], B[t][j]
     vector<vector<vector<double>>> A;
     vector<vector<double>> B;
+    // coeficientes R para mezcla universal por tabla
+    vector<vector<uint64_t>> R;
+
+    vector<vector<Nodo*>> tabla; // tabla[t][bucket] -> lista de Nodo*
 
     std::mt19937_64 rng;
 
-    TablaHash(int d, long long N){
-        dimension = d;
-        cantidad = max(2LL, N / 20); // buckets por tabla
-        if(cantidad > 2000000){
-            cantidad = 2000000; 
-        } 
+    static constexpr uint64_t P = 4294967311ULL; // primo grande (menor que 2^64)
 
-        // Calcular k 
-        double logd = log2(max(2, d));
-        double logN = log10(max(10LL, N));
-        k = max(3, int(ceil(logd + logN - 2)));
+public:
+    TablaHash(const vector<vector<long long>>& datos,
+              int numTablas = -1,
+              int numFunciones = -1,
+              long long buckets_hint = -1,
+              double w_hint = -1.0)
+        : dataset(datos), dimension(datos.empty() ? 0 : (int)datos[0].size())
+    {
+        long long N = (long long)datos.size();
 
-        // Calcular L 
-        L = max(5, int(ceil(sqrt(k) * 4)));
-        if(L > 50) L = 50;
+        // buckets: preferir una heurística razonable si no dan buckets_hint
+        if (buckets_hint > 0) cantidadBuckets = buckets_hint;
+        else cantidadBuckets = max(1LL, N / 20); 
+        if (cantidadBuckets > 1000000) cantidadBuckets = 1000000;
 
-        w = 4.0; // se puede ajustar automáticamente por dataset
+        // k, L por heurística si no se dan
+        k = (numFunciones > 0) ? numFunciones : max(3, (int)ceil(log2(max(1, dimension)) + 2));
+        L = (numTablas > 0) ? numTablas : min(50, 5 + (int)(sqrt(max(1, dimension)) * 1.5));
 
-        // Inicializar RNG (semilla por reloj)
+        // w por heurística o override
+        if (w_hint > 0.0) w = w_hint;
+        else w = 50.0 + 0.5 * sqrt(max(1, dimension)) * 20.0;
+
+        // reservar tabla
+        tabla.resize(L, vector<Nodo*>(cantidadBuckets, nullptr));
+
+        // rng
         std::random_device rd;
         rng.seed(rd());
 
-        // Crear A y B
-        std::normal_distribution<double> gaussian(0.0, 1.0); // para vectores a ~ N(0,1)
-        std::uniform_real_distribution<double> uniform_b(0.0, w); // b en [0, w)
+        // inicializar A y B
+        std::normal_distribution<double> gaussian(0.0, 1.0);
+        std::uniform_real_distribution<double> uniform_b(0.0, w);
 
-        A.resize(L);
-        B.resize(L);
-        for(int t = 0; t < L; ++t){
-            A[t].resize(k, vector<double>(dimension));
-            B[t].resize(k);
-            for(int j = 0; j < k; ++j){
-                for(int dim = 0; dim < dimension; ++dim){
+        A.assign(L, vector<vector<double>>(k, vector<double>(dimension)));
+        B.assign(L, vector<double>(k));
+        R.assign(L, vector<uint64_t>(k));
+
+        // coeficientes R aleatorios en [1, P-1]
+        std::uniform_int_distribution<uint64_t> unifR(1, P - 1);
+
+        for (int t = 0; t < L; ++t) {
+            for (int j = 0; j < k; ++j) {
+                for (int dim = 0; dim < dimension; ++dim) {
                     A[t][j][dim] = gaussian(rng);
                 }
                 B[t][j] = uniform_b(rng);
+                R[t][j] = unifR(rng);
             }
         }
     }
 
-
-
-    double distanciaEntrePuntos(const vector<long long>& p1, const vector<long long>& p2){
-        double sum = 0.0;
-        for(int i = 0; i < dimension; ++i){
-
-            double diff=double(p1[i])-double(p2[i]);
-            sum+=diff*diff;
-
+    ~TablaHash() {
+        // liberar nodos
+        for (int t = 0; t < L; ++t) {
+            for (long long b = 0; b < cantidadBuckets; ++b) {
+                Nodo* ptr = tabla[t][b];
+                while (ptr) {
+                    Nodo* nxt = ptr->next;
+                    delete ptr;
+                    ptr = nxt;
+                }
+            }
         }
-        return std::sqrt(sum);
     }
 
+    // distancia al cuadrado (evita sqrt para comparaciones)
+    double distanciaCuadrada(const vector<long long>& p1, const vector<long long>& p2) const {
+        double s = 0.0;
+        for (int i = 0; i < dimension; ++i) {
+            double d = double(p1[i]) - double(p2[i]);
+            s += d * d;
+        }
+        return s;
+    }
 
+    // calcular el bucket para un punto (tablaIdx)
+    long long FuncionHashId(const vector<long long>& punto, int tablaIdx) const {
+        if (cantidadBuckets <= 0) return 0;
 
+        __uint128_t g = 0;
 
-    // FuncionHash: calcula el bucket index para 'punto' en la tabla 'tablaIdx'
-    long long FuncionHash(const vector<long long>& punto, int tablaIdx = 0){
-        // Para cada una de las k funciones: h_j(p) = floor((a_j . p + b_j) / w)
-        // Combinamos los k valores (por ejemplo, mediante hashing)
-        // Finalmente tomamos modulo cantidad para obtener bucket index.
-        // Nota: cantidad debe ser > 0
-        if(cantidad <= 0) return 0;
-
-        // combinar en 64-bit
-        uint64_t comb = 1469598103934665603ULL; // FNV offset basis
-        const uint64_t FNV_PRIME = 1099511628211ULL;
-
-        for(int j = 0; j < k; ++j){
+        for (int j = 0; j < k; ++j) {
             double dot = 0.0;
-            for(int dim = 0; dim < dimension; ++dim){
+            for (int dim = 0; dim < dimension; ++dim) {
                 dot += A[tablaIdx][j][dim] * double(punto[dim]);
             }
-            double val = (dot + B[tablaIdx][j]) / w;
-            long long hj = static_cast<long long>(std::floor(val));
+            long long hj = (long long)floor((dot + B[tablaIdx][j]) / w);
 
-            // mezclar hj en comb (mezcla simple tipo FNV sobre bytes)
-            uint64_t x = static_cast<uint64_t>(hj);
-            for(int b = 0; b < 8; ++b){
-                uint8_t byte = (x >> (b*8)) & 0xFF;
-                comb ^= byte;
-                comb *= FNV_PRIME;
+            // normalizar hj a entero positivo modulo P
+            uint64_t hj_mod;
+            if (hj >= 0) hj_mod = (uint64_t)hj % P;
+            else {
+                // convertir negativo a [0, P-1]
+                long long tmp = hj % (long long)P;
+                if (tmp < 0) tmp += (long long)P;
+                hj_mod = (uint64_t)tmp;
             }
+
+            // g = (g + hj_mod * R[tablaIdx][j]) % P
+            __uint128_t mul = ( __uint128_t ) hj_mod * ( __uint128_t ) R[tablaIdx][j];
+            g = (g + (mul % P)) % P;
         }
 
-        long long idx = static_cast<long long>(comb % static_cast<uint64_t>(cantidad));
-        if(idx < 0) idx += cantidad;
-        return idx;
+        uint64_t g64 = (uint64_t)g;
+        return (long long)(g64 % (uint64_t)cantidadBuckets);
     }
 
-    // Insertar un punto en todas las L tablas (en su bucket correspondiente)
-    void insertarPunto(const vector<long long>& punto){
-        for(int t = 0; t < L; ++t){
-            long long idx = FuncionHash(punto, t);
-            Nodo* actual = tabla[t][idx];
+    // insertar por índices (se asume dataset ya poblado externamente)
+    void insertarIndice(int puntoId) {
+        if (puntoId < 0 || puntoId >= (int)dataset.size()) return;
+        const auto& punto = dataset[puntoId];
 
-            if(actual == nullptr){
-                tabla[t][idx] = new Nodo(punto, nullptr);
-                continue;
-            }
-            // recorrer hasta el final
-            Nodo* prev = nullptr;
-            while(actual != nullptr){
-                if(actual->data == punto){
-                    // ya existe no insertar duplicado
-                    actual = nullptr;
-                    prev = nullptr;
-                    break;
-                }
-
-                prev = actual;
-                actual = actual->next;
-            }
-
-            if(prev != nullptr){//insertamos al final el punto
-                prev->next = new Nodo(punto, nullptr);
-            }
+        for (int t = 0; t < L; ++t) {
+            long long idx = FuncionHashId(punto, t);
+            // inserción en cabeza (O(1))
+            Nodo* nuevo = new Nodo(puntoId, tabla[t][idx]);
+            tabla[t][idx] = nuevo;
         }
     }
 
-    // Buscar vecino más cercano aproximado usando LSH:
-    // - consultamos los buckets en cada tabla correspondientes al hash del query
-    // - comparamos todos los puntos en esos buckets (evitando duplicados entre tablas)
-    vector<long long> buscarPuntoMasCercano(const vector<long long>& punto){
-        double minDist = std::numeric_limits<double>::infinity();
-        vector<long long> puntoCercano;
-        unordered_set<const vector<long long>*> yaVistos;
+    // insertar todos (helper)
+    void insertarTodos() {
+        for (int i = 0; i < (int)dataset.size(); ++i) insertarIndice(i);
+    }
 
-        for(int t = 0; t < L; ++t){//Buscamos en cada una de las L tablas con hashings diferentes
+    // buscar vecino más cercano aproximado (devuelve índice en dataset o -1)
+    int buscarVecinoMasCercano(const vector<long long>& query, int maxCandidatos = -1) const {
+        double minDistSq = std::numeric_limits<double>::infinity();
+        int bestId = -1;
+        unordered_set<int> vistos;
+        int revisados = 0;
+        if (maxCandidatos <= 0) maxCandidatos = 10 * L; // heurística
 
-            long long idx = FuncionHash(punto, t);//Buscamos el inicio del bucket
-
-            Nodo* actual = tabla[t][idx];
-
-            while(actual != nullptr){//Comprobamos todas las didstancias en 
-                
-                const vector<long long>& vec = actual->data;
-
-
-                if(yaVistos.find(&vec)==yaVistos.end()){//calculamos la distancia y puntos para los que no han sido visitados
-
-                    yaVistos.insert(&vec);
-
-                    double dist = distanciaEntrePuntos(punto, actual->data);
-                    if(dist < minDist){
-                        minDist = dist;
-                        puntoCercano = actual->data;
+        for (int t = 0; t < L; ++t) {
+            long long idx = FuncionHashId(query, t);
+            Nodo* ptr = tabla[t][idx];
+            while (ptr != nullptr) {
+                int id = ptr->puntoId;
+                if (!vistos.count(id)) {
+                    vistos.insert(id);
+                    double d2 = distanciaCuadrada(query, dataset[id]);
+                    if (d2 < minDistSq) {
+                        minDistSq = d2;
+                        bestId = id;
                     }
+                    if (++revisados >= maxCandidatos) return bestId;
                 }
-                actual = actual->next;
+                ptr = ptr->next;
             }
         }
-
-        return puntoCercano; 
+        return bestId;
     }
 
-    // Destructor falta
-    
+    // getters para parámetros si se necesitan
+    int getL() const { return L; }
+    int getK() const { return k; }
+    long long getBuckets() const { return cantidadBuckets; }
+    double getW() const { return w; }
 };
-
-int main(){
-    
-}
